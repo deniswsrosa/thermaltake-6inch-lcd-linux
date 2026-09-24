@@ -8,7 +8,12 @@ cfg keys used here: slots (list of metric keys), accent, accent2,
 background, unit ("C" or "F").
 """
 
-from PIL import Image, ImageDraw, ImageFont
+import importlib.util
+import os
+import sys
+from pathlib import Path
+
+from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 import sensors
 from sensors import METRICS
@@ -26,21 +31,26 @@ _font_cache = {}
 WARN, CRIT = "#ffb020", "#ff4d4d"
 
 
+_custom_font = None   # set per render from cfg["font"]
+
+
 def _font(size, weight):
-    key = (size, weight)
+    path = _custom_font or FONTS[weight]
+    key = (size, path)
     if key not in _font_cache:
         try:
-            _font_cache[key] = ImageFont.truetype(FONTS[weight], size)
+            _font_cache[key] = ImageFont.truetype(path, size)
         except OSError:
-            _font_cache[key] = ImageFont.load_default()
+            _font_cache[key] = ImageFont.truetype(FONTS[weight], size) if _custom_font else \
+                ImageFont.load_default()
     return _font_cache[key]
 
 
 class Canvas:
     """PIL drawing in panel coordinates on a supersampled image."""
 
-    def __init__(self, background):
-        self.img = Image.new("RGB", (W * SS, H * SS), background)
+    def __init__(self, background, image=None, dim=50):
+        self.img = _background(background, image, dim)
         self.d = ImageDraw.Draw(self.img)
 
     @staticmethod
@@ -70,7 +80,34 @@ class Canvas:
         return self.img.resize((W, H), Image.LANCZOS)
 
 
+_bg_cache = {}
+
+
+def _background(colour, path, dim):
+    """Solid colour, or an image cover-fitted to the panel and dimmed toward colour."""
+    if not path:
+        return Image.new("RGB", (W * SS, H * SS), colour)
+    try:
+        key = (path, os.path.getmtime(path), colour, dim)
+    except OSError:
+        return Image.new("RGB", (W * SS, H * SS), colour)
+    if key not in _bg_cache:
+        try:
+            img = ImageOps.fit(Image.open(path).convert("RGB"), (W * SS, H * SS), Image.LANCZOS)
+            img = Image.blend(img, Image.new("RGB", img.size, colour), dim / 100)
+        except OSError:
+            img = Image.new("RGB", (W * SS, H * SS), colour)
+        _bg_cache.clear()
+        _bg_cache[key] = img
+    return _bg_cache[key].copy()
+
+
 # ── value helpers ────────────────────────────────────────────────────────────
+def label(key, cfg):
+    """Metric label, unless the user renamed it in cfg["labels"]."""
+    return (cfg.get("labels") or {}).get(key) or METRICS[key].label
+
+
 def fmt(key, value, cfg, with_unit=True):
     m = METRICS[key]
     if key == "none":
@@ -83,7 +120,7 @@ def fmt(key, value, cfg, with_unit=True):
         return f"{value:.0f}°" if with_unit else f"{value:.0f}"
     if m.unit == "%":
         return f"{value:.0f}%" if with_unit else f"{value:.0f}"
-    return f"{value:.0f} {m.unit}" if with_unit else f"{value:.0f}"
+    return f"{value:.0f} {m.unit}".strip() if with_unit else f"{value:.0f}"
 
 
 def unit_suffix(key, cfg):
@@ -148,14 +185,14 @@ def big(c, v, cfg):
     for i, (key, sub) in enumerate(cols):
         accent = column_accent(cfg, i)
         cx = cw * (i + 0.5)
-        c.text((cx, 58), METRICS[key].label, 44 if n < 3 else 38,
+        c.text((cx, 58), label(key, cfg), 44 if n < 3 else 38,
                mix(accent, "#ffffff", 0.35), anchor="mt")
         c.text((cx, 300), fmt(key, v[key], cfg), size,
                status_colour(key, v[key], accent), weight="cond", anchor="ms")
         if sub != "none":
             x0, x1 = cx - cw / 2 + 36, cx + cw / 2 - 36
             fs = 30 if n < 3 else 26
-            c.text((x0, 360), METRICS[sub].label, fs, "#a0a6b2", weight=False)
+            c.text((x0, 360), label(sub, cfg), fs, "#a0a6b2", weight=False)
             c.text((x1, 356), fmt(sub, v[sub], cfg), fs + 10, "#ffffff", anchor="ra")
             bar(c, (x0, 420, x1, 460), fraction(sub, v[sub]), accent, track)
         if i:
@@ -180,12 +217,12 @@ def gauges(c, v, cfg):
             c.arc(box, 135, 135 + 270 * frac, status_colour(key, v[key], accent), stroke)
         c.text((cx, cy + r * 0.28), fmt(key, v[key], cfg, with_unit=False), int(r * 0.73),
                "#ffffff", weight="cond", anchor="ms")
-        c.text((cx, cy - r * 0.45), METRICS[key].label, int(r * 0.19),
+        c.text((cx, cy - r * 0.45), label(key, cfg), int(r * 0.19),
                mix(accent, "#ffffff", 0.35), anchor="mm")
         c.text((cx, cy + r * 0.49), unit_suffix(key, cfg), int(r * 0.15), "#a0a6b2",
                weight=False, anchor="mm")
         if sub != "none":
-            c.text((cx, 515), f"{METRICS[sub].label}  {fmt(sub, v[sub], cfg)}",
+            c.text((cx, 515), f"{label(sub, cfg)}  {fmt(sub, v[sub], cfg)}",
                    36 if n < 3 else 28, "#ffffff", anchor="ms")
 
 
@@ -200,7 +237,7 @@ def bars(c, v, cfg):
         accent = accents[i % 2]
         colour = status_colour(key, v[key], accent)
         size = min(96, int(row_h * 0.5))
-        c.text((40, y + row_h * 0.55), METRICS[key].label, int(size * 0.6),
+        c.text((40, y + row_h * 0.55), label(key, cfg), int(size * 0.6),
                mix(accent, "#ffffff", 0.35), anchor="ls")
         c.text((W - 40, y + row_h * 0.55), fmt(key, v[key], cfg), size, colour,
                weight="cond", anchor="rs")
@@ -213,11 +250,11 @@ def single(c, v, cfg):
     """One metric, as large as the panel allows, with an optional second below."""
     key, sub = slot(cfg, 0, "cpu_temp"), slot(cfg, 1)
     colour = status_colour(key, v[key], cfg["accent"])
-    c.text((W // 2, 70), METRICS[key].label, 56, mix(cfg["accent"], "#ffffff", 0.35),
+    c.text((W // 2, 70), label(key, cfg), 56, mix(cfg["accent"], "#ffffff", 0.35),
            anchor="mt")
     c.text((W // 2, 400), fmt(key, v[key], cfg), 330, colour, weight="cond", anchor="ms")
     if sub != "none":
-        c.text((W // 2, 500), f"{METRICS[sub].label}  {fmt(sub, v[sub], cfg)}", 48,
+        c.text((W // 2, 500), f"{label(sub, cfg)}  {fmt(sub, v[sub], cfg)}", 48,
                cfg["accent2"], anchor="ms")
 
 
@@ -260,13 +297,13 @@ def synthwave(c, v, cfg):
         colour = status_colour(key, v[key], column_accent(cfg, i))
         for target, fill in ((g, colour), (c, "#ffffff")):
             target.text((cx, 250), fmt(key, v[key], cfg), size, fill, weight="cond", anchor="ms")
-        c.text((cx, 62), METRICS[key].label, 44 if n < 3 else 38, colour, anchor="mt")
+        c.text((cx, 62), label(key, cfg), 44 if n < 3 else 38, colour, anchor="mt")
         if sub != "none":
             fs = 34 if n < 3 else 26
-            label = f"{METRICS[sub].label}  {fmt(sub, v[sub], cfg)}"
-            half = c.text_width(label, fs) / 2 + 20
+            pill = f"{label(sub, cfg)}  {fmt(sub, v[sub], cfg)}"
+            half = c.text_width(pill, fs) / 2 + 20
             c.rect((cx - half, 372, cx + half, 432), "#0b0414", radius=30, outline=colour, width=2)
-            c.text((cx, 402), label, fs, "#ffffff", anchor="mm")
+            c.text((cx, 402), pill, fs, "#ffffff", anchor="mm")
     halo = glow.filter(ImageFilter.GaussianBlur(18 * SS))
     c.img = ImageChops.add(c.img, halo)
     c.d = ImageDraw.Draw(c.img)
@@ -295,6 +332,8 @@ TEMPLATES = {
 def defaults(name, gpus=None):
     """Default metrics for a template: one column/row per GPU when there are several."""
     gpus = sensors.gpu_count() if gpus is None else gpus
+    if "defaults" in TEMPLATES.get(name, {}):
+        return list(TEMPLATES[name]["defaults"])
     if name == "single":
         return ["cpu_temp", "cpu_load"]
     if name == "bars":
@@ -314,13 +353,51 @@ def resolve(cfg):
     for k in ("accent", "accent2", "background"):
         out[k] = cfg.get(k) or t[k]
     slots, dflt = list(cfg.get("slots") or []), defaults(name)
+    dflt += ["none"] * (len(t["slots"]) - len(dflt))
     out["slots"] = [slots[i] if i < len(slots) and slots[i] in METRICS else dflt[i]
                     for i in range(len(t["slots"]))]
     return out
 
 
 def render(values, cfg):
+    global _custom_font
     cfg = resolve(cfg)
-    c = Canvas(cfg["background"])
-    TEMPLATES[cfg["template"]]["fn"](c, values, cfg)
+    _custom_font = cfg.get("font") or None
+    values = {**{k: None for k in METRICS}, **values}
+    c = Canvas(cfg["background"], cfg.get("background_image"), cfg.get("background_dim", 50))
+    try:
+        TEMPLATES[cfg["template"]]["fn"](c, values, cfg)
+    except Exception as exc:  # a broken plugin template must not take the daemon down
+        c = Canvas("#000000")
+        c.text((W // 2, H // 2), f"template error: {exc}"[:60], 30, "#ff4d4d", anchor="mm")
     return c.result()
+
+
+# ── user templates ───────────────────────────────────────────────────────────
+PLUGIN_DIR = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) / "tt600" / "templates"
+
+
+def load_plugins(directory=PLUGIN_DIR):
+    """Load user templates: each <name>.py defines TEMPLATE (dict) and draw(c, values, cfg).
+
+    TEMPLATE keys: "name", "slots" (list of slot names), and optionally
+    "defaults" (metric per slot), "accent", "accent2", "background".
+    Errors are reported and the file is skipped.
+    """
+    for path in sorted(Path(directory).glob("*.py")):
+        try:
+            spec = importlib.util.spec_from_file_location(f"tt600_template_{path.stem}", path)
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            meta = dict(module.TEMPLATE)
+            TEMPLATES[path.stem] = {"fn": module.draw, "name": meta.get("name", path.stem),
+                                    "slots": list(meta["slots"]),
+                                    "accent": meta.get("accent", "#ffffff"),
+                                    "accent2": meta.get("accent2", "#8f98a8"),
+                                    "background": meta.get("background", "#000000"),
+                                    **({"defaults": list(meta["defaults"])} if "defaults" in meta else {})}
+        except Exception as exc:
+            print(f"tt600: skipping template {path}: {exc}", file=sys.stderr)
+
+
+load_plugins()

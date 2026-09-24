@@ -9,6 +9,7 @@ Needs GTK 3 and Ayatana AppIndicator (python3-gi, gir1.2-ayatanaappindicator3-0.
 On GNOME the AppIndicator extension must be enabled (Ubuntu enables it by default).
 """
 
+import subprocess
 import sys
 
 import gi
@@ -16,7 +17,7 @@ import gi
 gi.require_version("Gtk", "3.0")
 gi.require_version("AyatanaAppIndicator3", "0.1")
 from gi.repository import AyatanaAppIndicator3 as AppIndicator  # noqa: E402
-from gi.repository import Gdk, GdkPixbuf, GLib, Gtk  # noqa: E402
+from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 
 import psutil  # noqa: E402
 
@@ -194,8 +195,8 @@ class Tray(Gtk.Application):
         left.pack_start(note, False, False, 0)
         box.pack_start(left, False, False, 0)
 
-        self.grid = Gtk.Grid(column_spacing=12, row_spacing=8)
-        box.pack_start(self.grid, True, True, 0)
+        self.notebook = Gtk.Notebook()
+        box.pack_start(self.notebook, True, True, 0)
         self.window = w
         self.preview_timer = GLib.timeout_add(1500, self.live_preview)
         w.show_all()
@@ -207,24 +208,22 @@ class Tray(Gtk.Application):
     def fill_window(self):
         """(Re)build the controls from the current settings."""
         self.syncing = True
-        for child in self.grid.get_children():
-            self.grid.remove(child)
+        page = max(self.notebook.get_current_page(), 0)
+        for child in self.notebook.get_children():
+            self.notebook.remove(child)
         cfg = templates.resolve(self.cfg)
-        row = 0
 
-        def heading(text):
-            nonlocal row
-            label = Gtk.Label(xalign=0)
-            label.set_markup(f"<b>{text}</b>")
-            label.set_margin_top(8 if row else 0)
-            self.grid.attach(label, 0, row, 2, 1)
-            row += 1
+        def new_page(title):
+            grid = Gtk.Grid(column_spacing=12, row_spacing=8, border_width=12)
+            self.notebook.append_page(grid, Gtk.Label(label=title))
+            return grid
 
-        def add(label, widget):
-            nonlocal row
-            self.grid.attach(Gtk.Label(label=label, xalign=0, hexpand=True), 0, row, 1, 1)
-            self.grid.attach(widget, 1, row, 1, 1)
-            row += 1
+        def add(grid, label, *widgets):
+            row = len(grid.get_children()) and max(grid.child_get_property(c, "top-attach")
+                                                    for c in grid.get_children()) + 1
+            grid.attach(Gtk.Label(label=label, xalign=0, hexpand=True), 0, row, 1, 1)
+            for col, widget in enumerate(widgets, 1):
+                grid.attach(widget, col, row, 1 if col < len(widgets) else 3 - len(widgets) + 1, 1)
 
         def combo(options, active, on_change):
             c = Gtk.ComboBoxText()
@@ -234,50 +233,120 @@ class Tray(Gtk.Application):
             c.connect("changed", lambda w: self.syncing or on_change(w.get_active_id()))
             return c
 
-        heading("Template")
-        add("Layout", combo([(k, t["name"]) for k, t in templates.TEMPLATES.items()],
-                            cfg["template"], self.set_template))
+        def file_picker(key, title, patterns):
+            btn = Gtk.FileChooserButton(title=title, action=Gtk.FileChooserAction.OPEN)
+            flt = Gtk.FileFilter()
+            for pattern in patterns:
+                flt.add_pattern(pattern)
+            btn.set_filter(flt)
+            if cfg.get(key):
+                btn.set_filename(cfg[key])
+            btn.connect("file-set", lambda b: self.update(**{key: b.get_filename()}))
+            clear = Gtk.Button(label="Clear")
+            clear.connect("clicked", lambda *_: (self.update(**{key: None}), self.fill_window()))
+            return btn, clear
 
-        heading("Metrics")
-        metric_options = [(k, sensors.METRICS[k].label or "(empty)")
-                          for k in sensors.available(sensors.gpu_count())]
+        # Layout: template, metric per slot, optional label override
+        grid = new_page("Layout")
+        add(grid, "Template", combo([(k, t["name"]) for k, t in templates.TEMPLATES.items()],
+                                    cfg["template"], self.set_template))
+        options = []
+        for k in sensors.available():
+            m = sensors.METRICS[k]
+            text = m.label or "(empty)"
+            options.append((k, text if m.group in ("System", "GPUs") else f"{text}  · {m.group}"))
         for i, name in enumerate(templates.TEMPLATES[cfg["template"]]["slots"]):
+            key = cfg["slots"][i]
+
             def set_slot(value, i=i):
                 slots = list(templates.resolve(self.cfg)["slots"])
                 slots[i] = value
                 self.update(slots=slots)
-            add(name, combo(metric_options, cfg["slots"][i], set_slot))
+                self.fill_window()
 
-        heading("Colours")
+            entry = Gtk.Entry(placeholder_text=sensors.METRICS[key].label or "label", width_chars=12)
+            entry.set_text((cfg.get("labels") or {}).get(key, ""))
+            entry.set_tooltip_text("Rename this metric on the panel (leave empty for the default)")
+            entry.set_sensitive(key != "none")
+
+            def set_label(e, key=key):
+                labels = dict(self.cfg.get("labels") or {})
+                labels[key] = e.get_text().strip()
+                self.update(delay=500, labels={k: v for k, v in labels.items() if v})
+            entry.connect("changed", lambda e, f=set_label: self.syncing or f(e))
+            add(grid, name, combo(options, key, set_slot), entry)
+
+        # Look: colours, background image, font
+        grid = new_page("Look")
         for key, label in (("accent", "Accent"), ("accent2", "Second accent"),
-                           ("background", "Background")):
+                           ("background", "Background colour")):
             btn = Gtk.ColorButton.new_with_rgba(hex_to_rgba(cfg[key]))
             btn.connect("color-set", lambda b, key=key: self.update(**{key: rgba_to_hex(b.get_rgba())}))
-            add(label, btn)
+            add(grid, label, btn)
         reset = Gtk.Button(label="Reset colours")
         reset.connect("clicked", lambda *_: (self.update(accent=None, accent2=None, background=None),
                                              self.fill_window()))
-        add("", reset)
+        add(grid, "", reset)
+        add(grid, "Background image",
+            *file_picker("background_image", "Background image", ["*.png", "*.jpg", "*.jpeg", "*.webp"]))
+        dim = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 95, 5)
+        dim.set_value(cfg.get("background_dim", 50))
+        dim.set_size_request(180, -1)
+        dim.set_tooltip_text("How much the background colour covers the image, so numbers stay readable")
+        dim.connect("value-changed",
+                    lambda w: self.syncing or self.update(delay=300, background_dim=int(w.get_value())))
+        add(grid, "Image dimming", dim)
+        add(grid, "Font", *file_picker("font", "Font", ["*.ttf", "*.otf"]))
 
-        heading("Panel")
-        add("Temperature", combo([("C", "°C"), ("F", "°F")], cfg["unit"],
-                                 lambda v: self.update(unit=v)))
+        # Panel: units, GPU aggregation, brightness, refresh
+        grid = new_page("Panel")
+        add(grid, "Temperature", combo([("C", "°C"), ("F", "°F")], cfg["unit"],
+                                       lambda v: self.update(unit=v)))
         gpus = sensors.gpu_count()
-        add("Combined GPU", combo([("all", "Hottest card" if gpus > 1 else "Auto")]
-                         + [(str(i), f"GPU {i}") for i in range(gpus)],
-                         cfg["gpu"], lambda v: self.update(gpu=v)))
+        add(grid, "Combined GPU", combo([("all", "Hottest card" if gpus > 1 else "Auto")]
+                                        + [(str(i), f"GPU {i + 1}") for i in range(gpus)],
+                                        cfg["gpu"], lambda v: self.update(gpu=v)))
         scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 10, 100, 5)
         scale.set_value(cfg["brightness"])
         scale.set_size_request(180, -1)
         scale.connect("value-changed",
-                      lambda s: self.syncing or self.update(delay=400, brightness=int(s.get_value())))
-        add("Brightness", scale)
-        add("Update every", combo([(str(v), f"{v:g} s") for v in INTERVALS], str(cfg["interval"]),
-                                  lambda v: self.update(interval=float(v))))
+                      lambda w: self.syncing or self.update(delay=400, brightness=int(w.get_value())))
+        add(grid, "Brightness", scale)
+        add(grid, "Update every", combo([(str(v), f"{v:g} s") for v in INTERVALS],
+                                        str(cfg["interval"]), lambda v: self.update(interval=float(v))))
 
-        self.grid.show_all()
+        # Advanced: config file, custom templates, restart
+        grid = new_page("Advanced")
+        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=48)
+        note.set_markup("Custom metrics (any command that prints a number) are added to "
+                        "<tt>custom_metrics</tt> in the config file. Your own templates go in "
+                        "the templates folder. See the README for examples.")
+        grid.attach(note, 0, 0, 3, 1)
+        for label, action in (("Edit config file", lambda *_: self.open_path(config.CONFIG_PATH)),
+                              ("Open templates folder", lambda *_: self.open_path(templates.PLUGIN_DIR, True)),
+                              ("Reload templates and restart dashboard", lambda *_: self.reload())):
+            btn = Gtk.Button(label=label)
+            btn.connect("clicked", action)
+            add(grid, "", btn)
+
+        self.notebook.show_all()
+        self.notebook.set_current_page(page)
         self.syncing = False
         self.render_preview()
+
+    def open_path(self, path, directory=False):
+        if directory:
+            path.mkdir(parents=True, exist_ok=True)
+        elif not path.exists():
+            config.save(self.cfg, path)
+        Gio.AppInfo.launch_default_for_uri(path.as_uri(), None)
+
+    def reload(self):
+        templates.load_plugins()
+        subprocess.run(["systemctl", "--user", "restart", "tt600d"], check=False)
+        self.window.destroy()
+        self.indicator.set_menu(self.build_menu())
+        self.customize()
 
     def live_preview(self):
         self.values = sensors.read(self.cfg["gpu"])
