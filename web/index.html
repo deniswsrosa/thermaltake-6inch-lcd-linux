@@ -1,0 +1,195 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tt600 panel</title>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1b1f27; --muted: #656d7b;
+    --line: #dfe2e7; --accent: #2f6fed; --accent-text: #ffffff; --ok: #1f9d55; --bad: #d64545;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1116; --card: #181b22; --text: #e8eaef; --muted: #939aa7;
+      --line: #2a2f3a; --accent: #5b8cff; --accent-text: #0b0d12; --ok: #3ccf7e; --bad: #ff6b6b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 1180px; margin: 0 auto; padding: 24px 16px 48px; }
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 20px; }
+  h1 { font-size: 22px; margin: 0; }
+  .status { font-size: 13px; color: var(--muted); }
+  .status b { color: var(--ok); } .status b.off { color: var(--bad); }
+  .layout { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(280px, 1fr); gap: 20px; align-items: start; }
+  @media (max-width: 860px) { .layout { grid-template-columns: 1fr; } }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .preview img { width: 100%; aspect-ratio: 1110 / 540; display: block; border-radius: 8px; background: #000; }
+  .preview .note { font-size: 13px; color: var(--muted); margin-top: 8px; min-height: 1.4em; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+       margin: 18px 0 8px; font-weight: 600; }
+  h2:first-child { margin-top: 0; }
+  .templates { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px; }
+  .templates button { text-align: left; padding: 10px 12px; border-radius: 8px; cursor: pointer;
+                      border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  .templates button[aria-pressed="true"] { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 8px 0; }
+  .row label { color: var(--muted); }
+  select, input[type=range] { font: inherit; color: var(--text); background: var(--bg);
+                              border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; min-width: 150px; }
+  input[type=range] { padding: 0; accent-color: var(--accent); }
+  input[type=color] { width: 44px; height: 30px; border: 1px solid var(--line); border-radius: 6px;
+                      background: none; padding: 2px; cursor: pointer; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg button { border: 0; padding: 5px 14px; background: var(--bg); color: var(--text); cursor: pointer; font: inherit; }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-text); }
+  .link { background: none; border: 0; color: var(--accent); cursor: pointer; font: inherit; padding: 0; }
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 18px; }
+  .primary { background: var(--accent); color: var(--accent-text); border: 0; border-radius: 8px;
+             padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer; }
+  .primary:disabled { opacity: .5; cursor: default; }
+  .saved { font-size: 13px; color: var(--muted); }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>tt600 panel</h1>
+    <span class="status" id="status">connecting…</span>
+  </header>
+  <div class="layout">
+    <section class="card preview">
+      <img id="preview" alt="Panel preview">
+      <div class="note" id="note"></div>
+    </section>
+    <section class="card">
+      <h2>Template</h2>
+      <div class="templates" id="templates"></div>
+
+      <h2>Metrics</h2>
+      <div id="slots"></div>
+
+      <h2>Colours <button class="link" id="resetColours" type="button">reset</button></h2>
+      <div class="row"><label for="accent">Accent</label><input type="color" id="accent"></div>
+      <div class="row"><label for="accent2">Second accent</label><input type="color" id="accent2"></div>
+      <div class="row"><label for="background">Background</label><input type="color" id="background"></div>
+
+      <h2>Panel</h2>
+      <div class="row"><label>Temperature</label>
+        <span class="seg" id="unit"><button data-v="C">°C</button><button data-v="F">°F</button></span></div>
+      <div class="row"><label for="gpu">GPU</label><select id="gpu"></select></div>
+      <div class="row"><label for="brightness">Brightness <span id="brightnessVal"></span></label>
+        <input type="range" id="brightness" min="10" max="100" step="5"></div>
+      <div class="row"><label for="interval">Update every</label>
+        <select id="interval">
+          <option value="0.5">0.5 s</option><option value="1">1 s</option>
+          <option value="2">2 s</option><option value="4">4 s</option>
+        </select></div>
+
+      <div class="actions">
+        <button class="primary" id="save" disabled>Apply to panel</button>
+        <span class="saved" id="saved"></span>
+      </div>
+    </section>
+  </div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+let meta = null, draft = null, saved = null, timer = null, objectUrl = null;
+
+async function load() {
+  meta = await (await fetch("/api/state")).json();
+  draft = structuredClone(meta.config);
+  draft.slots = meta.resolved.slots;
+  saved = JSON.stringify(draft);
+  build();
+  refresh();
+  setInterval(pollStatus, 5000);
+}
+
+async function pollStatus() {
+  const s = await (await fetch("/api/state")).json();
+  showStatus(s.connected);
+  if (!dirty()) setPreview(await (await fetch("/api/preview")).blob());
+}
+
+function showStatus(connected) {
+  $("status").innerHTML = connected ? "panel <b>connected</b>"
+    : connected === false ? 'panel <b class="off">not found</b>' : "starting…";
+}
+
+function tpl() { return meta.templates[draft.template]; }
+
+function build() {
+  showStatus(meta.connected);
+  const box = $("templates"); box.innerHTML = "";
+  for (const [key, t] of Object.entries(meta.templates)) {
+    const b = document.createElement("button");
+    b.type = "button"; b.textContent = t.name;
+    b.setAttribute("aria-pressed", key === draft.template);
+    b.onclick = () => { draft.template = key; draft.slots = [...t.defaults];
+                        draft.accent = draft.accent2 = draft.background = null; build(); refresh(); };
+    box.appendChild(b);
+  }
+  const slots = $("slots"); slots.innerHTML = "";
+  tpl().slots.forEach((name, i) => {
+    const row = document.createElement("div"); row.className = "row";
+    const sel = document.createElement("select"); sel.id = "slot" + i;
+    for (const [k, label] of Object.entries(meta.metrics)) sel.add(new Option(label, k));
+    sel.value = draft.slots[i] || tpl().defaults[i];
+    sel.onchange = () => { draft.slots[i] = sel.value; refresh(); };
+    const lab = document.createElement("label"); lab.htmlFor = sel.id; lab.textContent = name;
+    row.append(lab, sel); slots.appendChild(row);
+  });
+  for (const k of ["accent", "accent2", "background"]) {
+    $(k).value = draft[k] || tpl()[k];
+    $(k).oninput = e => { draft[k] = e.target.value; refresh(); };
+  }
+  for (const b of $("unit").children) {
+    b.setAttribute("aria-pressed", b.dataset.v === draft.unit);
+    b.onclick = () => { draft.unit = b.dataset.v; build(); refresh(); };
+  }
+  const gpu = $("gpu"); gpu.innerHTML = "";
+  gpu.add(new Option(meta.gpus > 1 ? "All (hottest)" : "Auto", "all"));
+  for (let i = 0; i < meta.gpus; i++) gpu.add(new Option("GPU " + i, String(i)));
+  gpu.value = String(draft.gpu);
+  gpu.onchange = () => { draft.gpu = gpu.value; refresh(); };
+  $("brightness").value = draft.brightness; $("brightnessVal").textContent = draft.brightness + "%";
+  $("brightness").oninput = e => { draft.brightness = +e.target.value;
+                                   $("brightnessVal").textContent = draft.brightness + "%"; refresh(); };
+  $("interval").value = String(draft.interval);
+  $("interval").onchange = e => { draft.interval = +e.target.value; refresh(); };
+}
+
+function dirty() { return JSON.stringify(draft) !== saved; }
+
+function setPreview(blob) {
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = URL.createObjectURL(blob);
+  $("preview").src = objectUrl;
+}
+
+function refresh() {
+  $("save").disabled = !dirty();
+  $("note").textContent = dirty() ? "Preview — not applied to the panel yet." : "Showing what the panel shows.";
+  clearTimeout(timer);
+  timer = setTimeout(async () => {
+    const r = await fetch("/api/preview", { method: "POST", body: JSON.stringify(draft) });
+    setPreview(await r.blob());
+  }, 150);
+}
+
+$("resetColours").onclick = () => { draft.accent = draft.accent2 = draft.background = null; build(); refresh(); };
+$("save").onclick = async () => {
+  const r = await (await fetch("/api/config", { method: "POST", body: JSON.stringify(draft) })).json();
+  draft = structuredClone(r.config); draft.slots = r.resolved.slots;
+  saved = JSON.stringify(draft);
+  $("saved").textContent = "Applied " + new Date().toLocaleTimeString();
+  build(); refresh();
+};
+load();
+</script>
+</body>
+</html>

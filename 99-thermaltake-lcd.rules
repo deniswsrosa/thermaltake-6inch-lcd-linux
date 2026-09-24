@@ -1,0 +1,8 @@
+# Thermaltake 6.0" LCD Panel Kit for View 600 TG (AC-080-OO1NAN-A1)
+# 1480x720 TFT, TT RGB Plus 3.0, internal USB 9-pin.
+# Single HID interface, 1024-byte interrupt IN/OUT -> raw frame transport.
+#
+# Grants the logged-in desktop user access to the hidraw node (uaccess),
+# with a plugdev fallback for non-seat/systemd-service use.
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="264a", ATTRS{idProduct}=="2347", TAG+="uaccess", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="264a", ATTRS{idProduct}=="2347", TAG+="uaccess", MODE="0660", GROUP="plugdev"
