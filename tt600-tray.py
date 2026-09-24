@@ -28,7 +28,7 @@ import templates  # noqa: E402
 APP_ID = "io.github.deniswsrosa.tt600"
 ICON = "video-display-symbolic"
 PREVIEW_W = 555
-INTERVALS = (0.5, 1.0, 2.0, 4.0)
+INTERVALS = (0.5, 1.0, 2.0, 5.0, 10.0)
 BRIGHTNESS_STEPS = (25, 50, 75, 100)
 
 
@@ -349,7 +349,7 @@ class Tray(Gtk.Application):
         self.customize()
 
     def live_preview(self):
-        self.values = sensors.read(self.cfg["gpu"])
+        self.values = sensors.read(self.cfg["gpu"], templates.resolve(self.cfg)["slots"])
         self.render_preview()
         return True
 

@@ -15,7 +15,7 @@ CONFIG_PATH = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config")) /
 STATUS_PATH = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp")) / "tt600-status.json"
 
 DEFAULTS = {"template": "big", "slots": [], "accent": None, "accent2": None,
-            "background": None, "unit": "C", "gpu": "all", "brightness": 100, "interval": 1.0,
+            "background": None, "unit": "C", "gpu": "all", "brightness": 100, "interval": 2.0,
             "labels": {}, "background_image": None, "background_dim": 50, "font": None,
             "custom_metrics": []}
 
@@ -34,7 +34,7 @@ def clean(cfg):
     out["unit"] = "F" if out["unit"] == "F" else "C"
     out["gpu"] = out["gpu"] if out["gpu"] == "all" or str(out["gpu"]).isdigit() else "all"
     out["brightness"] = max(0, min(100, int(out["brightness"])))
-    out["interval"] = max(0.5, min(4.0, float(out["interval"])))  # panel times out after 5 s
+    out["interval"] = max(0.5, min(10.0, float(out["interval"])))  # the daemon keeps the panel alive
     labels = out["labels"] if isinstance(out["labels"], dict) else {}
     out["labels"] = {k: str(v)[:24] for k, v in labels.items() if k in sensors.METRICS and v}
     for k in ("background_image", "font"):

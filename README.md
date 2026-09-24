@@ -65,6 +65,23 @@ journalctl --user -u tt600d -f          # logs
 systemctl --user restart tt600d
 ```
 
+### Resource use
+
+The service is built to be left running. It uses about **0.2% of one CPU
+core and ~35 MB of memory**, and the idle tray icon uses even less. It
+achieves this by:
+
+- reading NVIDIA GPUs through NVML in-process instead of spawning `nvidia-smi`
+  (it falls back to `nvidia-smi` if NVML is missing)
+- sampling only the sensors that are on screen
+- re-rendering only when a displayed number changes; otherwise it re-sends the
+  last frame every 2 s to keep the panel from falling back to its own screen
+- rendering with cached backgrounds and low-resolution glow, then returning
+  image buffers to the OS
+
+The update interval ("Update every" in the tray) can go up to 10 s. The panel
+stays live either way.
+
 ## Command-line tools
 
 ```sh

@@ -10,6 +10,7 @@ The daemon reconnects if the panel disappears (replug, suspend/resume).
 """
 
 import argparse
+import ctypes
 import signal
 import sys
 import time
@@ -21,6 +22,20 @@ import config
 import sensors
 import templates
 import tt600
+
+
+KEEPALIVE = 2.0   # seconds between frames, whatever the update interval
+
+
+def _low_memory():
+    """Return rendering buffers to the OS instead of keeping them cached."""
+    from PIL import Image
+    Image.core.set_blocks_max(0)
+    try:
+        trim = ctypes.CDLL("libc.so.6").malloc_trim
+    except (OSError, AttributeError):   # not glibc
+        return lambda: None
+    return lambda: trim(0)
 
 
 class Stop(Exception):
@@ -38,7 +53,7 @@ def main():
     psutil.cpu_percent()  # prime the load counter
     if args.preview:
         time.sleep(0.5)
-        templates.render(sensors.read(cfg["gpu"]), cfg).save(args.preview)
+        templates.render(sensors.read(cfg["gpu"], templates.resolve(cfg)["slots"]), cfg).save(args.preview)
         return 0
 
     def stop(*_):
@@ -47,6 +62,7 @@ def main():
     signal.signal(signal.SIGINT, stop)
 
     status = {}
+    release = _low_memory()
 
     def publish(**new):
         nonlocal status
@@ -55,11 +71,13 @@ def main():
             config.write_status(status)
 
     panel, brightness = None, None
+    jpeg, shown, next_render = None, None, 0.0
     try:
         while True:
-            t0 = time.monotonic()
+            now = time.monotonic()
             if config.mtime(args.config) != cfg_mtime:
                 cfg, cfg_mtime = config.load(args.config), config.mtime(args.config)
+                next_render = 0.0   # show setting changes right away
             try:
                 if panel is None:
                     node = tt600.find_device()
@@ -76,8 +94,17 @@ def main():
                 if cfg["brightness"] != brightness:
                     panel.brightness(cfg["brightness"])
                     brightness = cfg["brightness"]
-                values = sensors.read(cfg["gpu"])
-                panel.send_jpeg(tt600.to_jpeg(templates.render(values, cfg)))
+                if jpeg is None or now >= next_render:
+                    values = sensors.read(cfg["gpu"], templates.resolve(cfg)["slots"])
+                    key = templates.frame_key(values, cfg)
+                    if jpeg is None or key is None or key != shown:   # skip identical frames
+                        jpeg = tt600.to_jpeg(templates.render(values, cfg))
+                        shown = key
+                        release()
+                    next_render = now + cfg["interval"]
+                # Re-send at least every KEEPALIVE seconds: the panel falls back to
+                # its own screen when frames stop for `timeout` (5 s) seconds.
+                panel.send_jpeg(jpeg)
             except (OSError, TimeoutError, RuntimeError, ValueError) as exc:
                 print(f"tt600d: {exc}; reconnecting", file=sys.stderr, flush=True)
                 publish(connected=False)
@@ -89,7 +116,7 @@ def main():
                     panel = None
                 time.sleep(2)
                 continue
-            time.sleep(max(0.0, cfg["interval"] - (time.monotonic() - t0)))
+            time.sleep(max(0.05, min(next_render, time.monotonic() + KEEPALIVE) - time.monotonic()))
     except Stop:
         pass
     finally:

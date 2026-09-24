@@ -92,14 +92,15 @@ class Canvas:
         layer.img = Image.new("RGB", self.img.size, "#000000")
         layer.d = ImageDraw.Draw(layer.img)
         draw(layer)
-        self.img = ImageChops.add(self.img, layer.img.filter(ImageFilter.GaussianBlur(radius * SS)))
+        small = layer.img.reduce(4).filter(ImageFilter.GaussianBlur(radius * SS / 4))
+        self.img = ImageChops.add(self.img, small.resize(self.img.size, Image.BILINEAR))
         self.d = ImageDraw.Draw(self.img)
 
     def paste(self, img):
         self.img.paste(img.resize(self.img.size), (0, 0))
 
     def result(self):
-        return self.img.resize((W, H), Image.LANCZOS)
+        return self.img.reduce(SS)
 
 
 _bg_cache = {}
@@ -280,45 +281,52 @@ def single(c, v, cfg):
                cfg["accent2"], anchor="ms")
 
 
+_scenery = {}
+
+
+def _synthwave_scenery(background, accent, accent2, n):
+    """Sky, striped sun and perspective grid; depends only on colours, so it is cached."""
+    key = (background, accent, accent2, n)
+    if key not in _scenery:
+        bg = Image.new("RGB", (W, H), background)
+        d = ImageDraw.Draw(bg)
+        horizon = 330
+        for y in range(horizon):  # sky gradient
+            d.line((0, y, W, y), fill=mix(background, mix(accent2, "#000000", 0.55), (y / horizon) ** 2))
+        sun_r = 115 if n != 3 else 80
+        for i in range(sun_r):  # striped sun
+            y = horizon - sun_r + i
+            half = int((sun_r ** 2 - (sun_r - i) ** 2) ** 0.5)
+            if i > sun_r * 0.55 and (i // 9) % 2:
+                continue
+            d.line((W // 2 - half, y, W // 2 + half, y), fill=mix(accent, accent2, i / sun_r))
+        d.rectangle((0, horizon, W, H), fill=mix(background, "#000000", 0.4))
+        grid = mix(accent2, "#000000", 0.2)
+        for i in range(-12, 13):  # converging lines
+            d.line((W // 2 + i * 22, horizon, W // 2 + i * 190, H), fill=grid, width=2)
+        y, step = horizon, 6
+        while y < H:  # receding horizontals
+            d.line((0, y, W, y), fill=grid, width=2)
+            step *= 1.35
+            y += step
+        _scenery.clear()
+        _scenery[key] = bg          # kept at 1x; scaled up per frame to save memory
+    return _scenery[key].resize((W * SS, H * SS), Image.BILINEAR)
+
+
 def synthwave(c, v, cfg):
     """AIDA64-style 80s neon: sunset, perspective grid, glowing numbers."""
-    from PIL import ImageChops, ImageFilter
     cols = columns(cfg)
     n, cw = len(cols), W / len(cols)
-    bg = Image.new("RGB", (W, H), cfg["background"])
-    d = ImageDraw.Draw(bg)
-    horizon = 330
-    for y in range(horizon):  # sky gradient
-        d.line((0, y, W, y), fill=mix(cfg["background"], mix(cfg["accent2"], "#000000", 0.55),
-                                      (y / horizon) ** 2))
-    sun_r = 115 if n != 3 else 80
-    for i in range(sun_r):  # striped sun
-        y = horizon - sun_r + i
-        half = int((sun_r ** 2 - (sun_r - i) ** 2) ** 0.5)
-        if i > sun_r * 0.55 and (i // 9) % 2:
-            continue
-        d.line((W // 2 - half, y, W // 2 + half, y),
-               fill=mix(cfg["accent"], cfg["accent2"], i / sun_r))
-    d.rectangle((0, horizon, W, H), fill=mix(cfg["background"], "#000000", 0.4))
-    grid = mix(cfg["accent2"], "#000000", 0.2)
-    for i in range(-12, 13):  # converging lines
-        d.line((W // 2 + i * 22, horizon, W // 2 + i * 190, H), fill=grid, width=2)
-    y, step = horizon, 6
-    while y < H:  # receding horizontals
-        d.line((0, y, W, y), fill=grid, width=2)
-        step *= 1.35
-        y += step
-    c.paste(bg)
-
-    glow = Image.new("RGB", (W * SS, H * SS), "#000000")
-    g = Canvas.__new__(Canvas)
-    g.img, g.d = glow, ImageDraw.Draw(glow)
+    c.img = _synthwave_scenery(cfg["background"], cfg["accent"], cfg["accent2"], n)
+    c.d = ImageDraw.Draw(c.img)
     size = {1: 240, 2: 190, 3: 150}[n]
+    numbers = []
     for i, (key, sub) in enumerate(cols):
         cx = cw * (i + 0.5)
         colour = status_colour(key, v[key], column_accent(cfg, i))
-        for target, fill in ((g, colour), (c, "#ffffff")):
-            target.text((cx, 250), fmt(key, v[key], cfg), size, fill, weight="cond", anchor="ms")
+        numbers.append((cx, fmt(key, v[key], cfg), colour))
+        c.text((cx, 250), fmt(key, v[key], cfg), size, "#ffffff", weight="cond", anchor="ms")
         c.text((cx, 62), label(key, cfg), 44 if n < 3 else 38, colour, anchor="mt")
         if sub != "none":
             fs = 34 if n < 3 else 26
@@ -326,9 +334,8 @@ def synthwave(c, v, cfg):
             half = c.text_width(pill, fs) / 2 + 20
             c.rect((cx - half, 372, cx + half, 432), "#0b0414", radius=30, outline=colour, width=2)
             c.text((cx, 402), pill, fs, "#ffffff", anchor="mm")
-    halo = glow.filter(ImageFilter.GaussianBlur(18 * SS))
-    c.img = ImageChops.add(c.img, halo)
-    c.d = ImageDraw.Draw(c.img)
+    c.glow(lambda g: [g.text((x, 250), t, size, col, weight="cond", anchor="ms")
+                      for x, t, col in numbers], 18)
 
 
 def tiles(c, v, cfg):
@@ -523,9 +530,8 @@ def terminal(c, v, cfg):
         for j, (text, colour) in enumerate(lines):
             target.text((40, top + j * row_h + row_h / 2), text, size, colour, weight="mono",
                         anchor="lm")
-        if int(time.time()) % 2 == 0:   # blinking cursor
-            x = 40 + target.text_width(prompt + " ", 30, "mono")
-            target.rect((x, 32, x + 18, 64), dim)
+        x = 40 + target.text_width(prompt + " ", 30, "mono")   # cursor
+        target.rect((x, 32, x + 18, 64), dim)
 
     draw(c)
     c.glow(draw, 10)
@@ -554,7 +560,7 @@ TEMPLATES = {
     "tiles":     {"fn": tiles, "name": "Tiles (iCUE style)",
                   "slots": [f"Tile {i}" for i in range(1, 7)],
                   "accent": "#4f8cff", "accent2": "#c9ced8", "background": "#0c0e13"},
-    "history":   {"fn": history, "name": "History graph",
+    "history":   {"fn": history, "name": "History graph", "live": True,
                   "slots": ["Line 1", "Line 2", "Line 3"],
                   "accent": "#ff7a45", "accent2": "#76b900", "background": "#0b0d12"},
     "digital":   {"fn": digital, "name": "Digital (7-segment)",
@@ -609,6 +615,15 @@ def resolve(cfg):
     return out
 
 
+def frame_key(values, cfg):
+    """What a frame shows: if this is unchanged, the previous frame can be re-sent."""
+    cfg = resolve(cfg)
+    if TEMPLATES[cfg["template"]].get("live"):
+        return None
+    shown = tuple(None if values.get(k) is None else round(values[k]) for k in cfg["slots"])
+    return shown, repr(sorted(cfg.items()))
+
+
 def render(values, cfg):
     global _custom_font
     cfg = resolve(cfg)
@@ -645,6 +660,7 @@ def load_plugins(directory=PLUGIN_DIR):
                                     "accent": meta.get("accent", "#ffffff"),
                                     "accent2": meta.get("accent2", "#8f98a8"),
                                     "background": meta.get("background", "#000000"),
+                                    "live": bool(meta.get("live")),
                                     **({"defaults": list(meta["defaults"])} if "defaults" in meta else {})}
         except Exception as exc:
             print(f"tt600: skipping template {path}: {exc}", file=sys.stderr)

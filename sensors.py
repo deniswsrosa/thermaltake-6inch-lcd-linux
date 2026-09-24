@@ -8,6 +8,7 @@ exposes is available as "hw:<chip>:<n>" (discover()), and users can add
 metrics backed by a shell command in config.json (register_custom()).
 """
 
+import ctypes
 import re
 import subprocess
 import time
@@ -123,7 +124,58 @@ def _cpu_temp(temps):
     return None
 
 
+class _NVML:
+    """Minimal NVML binding over ctypes: one library load, no process per sample."""
+
+    class _Util(ctypes.Structure):
+        _fields_ = [("gpu", ctypes.c_uint), ("memory", ctypes.c_uint)]
+
+    class _Mem(ctypes.Structure):
+        _fields_ = [("total", ctypes.c_ulonglong), ("free", ctypes.c_ulonglong),
+                    ("used", ctypes.c_ulonglong)]
+
+    def __init__(self):
+        self.lib = ctypes.CDLL("libnvidia-ml.so.1")
+        if self.lib.nvmlInit_v2() != 0:
+            raise OSError("nvmlInit failed")
+        count = ctypes.c_uint()
+        self.lib.nvmlDeviceGetCount_v2(ctypes.byref(count))
+        self.handles = []
+        for i in range(count.value):
+            h = ctypes.c_void_p()
+            if self.lib.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) == 0:
+                self.handles.append(h)
+
+    def read(self):
+        out = []
+        for h in self.handles:
+            temp, power = ctypes.c_uint(), ctypes.c_uint()
+            util, mem = self._Util(), self._Mem()
+            row = [
+                float(temp.value) if self.lib.nvmlDeviceGetTemperature(h, 0, ctypes.byref(temp)) == 0 else None,
+                float(util.gpu) if self.lib.nvmlDeviceGetUtilizationRates(h, ctypes.byref(util)) == 0 else None,
+                None, None,
+                power.value / 1000 if self.lib.nvmlDeviceGetPowerUsage(h, ctypes.byref(power)) == 0 else None,
+            ]
+            if self.lib.nvmlDeviceGetMemoryInfo(h, ctypes.byref(mem)) == 0:
+                row[2], row[3] = mem.used / 2**20, mem.total / 2**20
+            out.append(row)
+        return out
+
+
+_nvml = None
+
+
 def _nvidia():
+    """[[temp, util %, mem used MiB, mem total MiB, power W], ...] per NVIDIA GPU."""
+    global _nvml
+    if _nvml is None:
+        try:
+            _nvml = _NVML()
+        except (OSError, AttributeError):
+            _nvml = False   # no NVML: fall back to nvidia-smi
+    if _nvml:
+        return _nvml.read()
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu,"
@@ -157,26 +209,41 @@ def available(gpus=None):
             if not (k.startswith("gpu") and k[3].isdigit() and int(k[3]) >= gpus)]
 
 
-def read(gpu="all"):
-    """Sample every metric. gpu is an index, or "all" (hottest/busiest, summed power)."""
-    temps = psutil.sensors_temperatures()
-    mem = psutil.virtual_memory()
-    ssd = [e.current for e in temps.get("nvme", []) if e.label == "Composite"]
-    fans = [f.current for chip in psutil.sensors_fans().values() for f in chip if f.current]
-    values = {
-        "cpu_temp": _cpu_temp(temps),
-        "cpu_load": psutil.cpu_percent(),
-        "ram": mem.percent,
-        "ssd_temp": max(ssd) if ssd else None,
-        "fan": max(fans) if fans else None,
-        "gpu_temp": None, "gpu_load": None, "gpu_power": None, "gpu_vram": None,
-        "none": None,
-    }
-    for key, _, _, current, _, _ in _hw_entries():
-        values[key] = current
-    for key in list(_custom):
+def read(gpu="all", keys=None):
+    """Sample metrics. gpu is an index, or "all" (hottest/busiest, summed power).
+
+    keys limits sampling to the metrics actually on screen; sources nobody
+    uses (GPUs, hwmon, custom commands) are skipped entirely.
+    """
+    want = set(METRICS) if keys is None else set(keys)
+    values = {k: None for k in METRICS}
+    need_temps = want & {"cpu_temp", "ssd_temp"} or any(k.startswith("hw:temp:") for k in want)
+    need_fans = "fan" in want or any(k.startswith("hw:fan:") for k in want)
+    temps = psutil.sensors_temperatures() if need_temps else {}
+    fans = psutil.sensors_fans() if need_fans else {}
+    if "cpu_temp" in want:
+        values["cpu_temp"] = _cpu_temp(temps)
+    if "cpu_load" in want:
+        values["cpu_load"] = psutil.cpu_percent()
+    if "ram" in want:
+        values["ram"] = psutil.virtual_memory().percent
+    if "ssd_temp" in want:
+        ssd = [e.current for e in temps.get("nvme", []) if e.label == "Composite"]
+        values["ssd_temp"] = max(ssd) if ssd else None
+    if "fan" in want:
+        spinning = [f.current for chip in fans.values() for f in chip if f.current]
+        values["fan"] = max(spinning) if spinning else None
+    for kind, readings in (("temp", temps), ("fan", fans)):
+        for chip, entries in readings.items():
+            for n, e in enumerate(entries):
+                key = f"hw:{kind}:{chip}:{n}"
+                if key in want:
+                    values[key] = e.current
+    for key in want & set(_custom):
         values[key] = _run_custom(key)
 
+    if not any(k.startswith("gpu") for k in want):
+        return values
     gpus = _nvidia()
     for i in range(MAX_GPUS):
         temp, util, used, total, power = gpus[i] if i < len(gpus) else (None,) * 5

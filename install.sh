@@ -42,6 +42,7 @@ Description=Thermaltake 6" LCD panel dashboard (264a:2347)
 ExecStart=/usr/bin/python3 -u $DIR/tt600d.py
 Restart=always
 RestartSec=5
+TimeoutStopSec=5
 
 [Install]
 WantedBy=default.target
