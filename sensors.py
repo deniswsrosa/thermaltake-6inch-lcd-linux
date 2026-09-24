@@ -32,6 +32,19 @@ METRICS = {
     "none":      Metric("", "", 1),
 }
 
+MAX_GPUS = 4
+for _i in range(MAX_GPUS):  # per-card metrics, labelled from 1 for humans
+    METRICS[f"gpu{_i}_temp"] = Metric(f"GPU {_i + 1}", "temp", 100, 75, 85)
+    METRICS[f"gpu{_i}_load"] = Metric(f"GPU {_i + 1} LOAD", "%", 100)
+    METRICS[f"gpu{_i}_power"] = Metric(f"GPU {_i + 1} POWER", "W", 450)
+    METRICS[f"gpu{_i}_vram"] = Metric(f"GPU {_i + 1} VRAM", "%", 100)
+
+
+def available(gpus):
+    """Metric keys that make sense on a machine with `gpus` NVIDIA cards."""
+    return [k for k in METRICS
+            if not (k.startswith("gpu") and k[3].isdigit() and int(k[3]) >= gpus)]
+
 
 def _cpu_temp(temps):
     for chip, label in (("k10temp", "Tctl"), ("coretemp", "Package id 0"), ("zenpower", "Tdie")):
@@ -58,8 +71,14 @@ def _nvidia():
     return [[num(f) for f in line.split(",")] for line in out.strip().splitlines()]
 
 
+_gpu_count = None
+
+
 def gpu_count():
-    return len(_nvidia())
+    global _gpu_count
+    if _gpu_count is None:
+        _gpu_count = len(_nvidia())
+    return _gpu_count
 
 
 def read(gpu="all"):
@@ -78,6 +97,10 @@ def read(gpu="all"):
         "none": None,
     }
     gpus = _nvidia()
+    for i in range(MAX_GPUS):
+        temp, util, used, total, power = gpus[i] if i < len(gpus) else (None,) * 5
+        values.update({f"gpu{i}_temp": temp, f"gpu{i}_load": util, f"gpu{i}_power": power,
+                       f"gpu{i}_vram": 100 * used / total if used is not None and total else None})
     if gpu != "all":
         gpus = gpus[int(gpu):int(gpu) + 1]
     if gpus:

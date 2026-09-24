@@ -5,7 +5,8 @@ A Linux driver and dashboard for the **6.0" LCD Panel Kit for View 600 TG**
 TT RGB Plus on Windows.
 
 - Big, readable system-monitor templates, designed to be read from across the room
-- A settings page in the browser with a live preview
+- Two GPUs? Each card gets its own column
+- A tray icon with a Customize window and a live preview
 - Runs as a systemd service and starts at boot
 
 ![Templates](docs/templates.png)
@@ -24,7 +25,9 @@ amber and then red as they approach their limits.
 
 ## Install
 
-Needs Python 3, Pillow and psutil.
+Needs Python 3, Pillow and psutil. The tray app also needs PyGObject with
+GTK 3 and Ayatana AppIndicator. On GNOME, the AppIndicator extension must be
+enabled; Ubuntu enables it by default.
 
 ```sh
 git clone https://github.com/deniswsrosa/thermaltake-6inch-lcd-linux.git
@@ -35,14 +38,20 @@ cd thermaltake-6inch-lcd-linux
 `install.sh`:
 
 1. installs the udev rule, so the panel is accessible without root
-2. installs the Python dependencies if they are missing
-3. creates and starts the `tt600d` systemd user service
-4. enables lingering, so the service starts at boot without a login
+2. installs missing dependencies (apt, or pip as a fallback)
+3. creates and starts the `tt600d` systemd user service, and enables
+   lingering so it starts at boot without a login
+4. adds the tray app to autostart and to the app grid as "Thermaltake LCD"
 
-Then open **http://127.0.0.1:8600** to pick a template, choose the metrics for
-each slot, change colours, °C/°F, GPU and brightness. The preview updates as
-you change settings, and **Apply to panel** sends them to the screen.
-Settings are stored in `~/.config/tt600/config.json`.
+## Using it
+
+The **tray icon** menu has quick switches for the template, °C/°F and
+brightness. **Customize…** opens a window with a live preview where you pick
+the template, the metric in each slot, colours, the combined-GPU mode and the
+update rate. Changes apply to the panel immediately.
+
+Settings are stored in `~/.config/tt600/config.json`, and the service reloads
+the file whenever it changes, so you can also edit it by hand.
 
 ```sh
 systemctl --user status tt600d          # is it running?
@@ -55,6 +64,7 @@ systemctl --user restart tt600d
 ```sh
 python3 tt600d.py                       # the dashboard daemon, in the foreground
 python3 tt600d.py --preview out.png     # render one frame with the current settings
+python3 tt600-tray.py                   # the tray app
 python3 tt600.py status                 # handshake and print the panel's status JSON
 python3 tt600.py image photo.png        # show an image (until Ctrl-C, or --hold N)
 python3 tt600.py testpattern            # corner-marked frame for checking orientation
@@ -67,8 +77,8 @@ python3 tt_probe.py                     # read-only: identify, decode descriptor
 
 Templates live in `templates.py`. A template is a function
 `(canvas, values, cfg)` that draws in panel pixels (1110×540), plus an entry
-in `TEMPLATES` with its slot names, default metrics and colours. It shows up
-in the settings page automatically.
+in `TEMPLATES` with its slot names and colours. Default metrics come from
+`defaults()`. The new template shows up in the tray automatically.
 
 ## The hardware
 
