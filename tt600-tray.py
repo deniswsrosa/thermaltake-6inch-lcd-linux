@@ -320,7 +320,7 @@ class Tray(Gtk.Application):
         note = Gtk.Label(xalign=0, wrap=True, max_width_chars=48)
         note.set_markup("Custom metrics (any command that prints a number) are added to "
                         "<tt>custom_metrics</tt> in the config file. Your own templates go in "
-                        "the templates folder. See the README for examples.")
+                        "the templates folder. See docs/CUSTOMIZING.md for examples.")
         grid.attach(note, 0, 0, 3, 1)
         for label, action in (("Edit config file", lambda *_: self.open_path(config.CONFIG_PATH)),
                               ("Open templates folder", lambda *_: self.open_path(templates.PLUGIN_DIR, True)),

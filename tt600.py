@@ -28,6 +28,8 @@ hidraw note: usbhid strips a leading 0x00 report-number byte for devices with
 no numbered reports, so a 1024-byte report is written as 0x00 + 1024 bytes.
 """
 
+__version__ = "1.0.0"
+
 import argparse
 import glob
 import io
