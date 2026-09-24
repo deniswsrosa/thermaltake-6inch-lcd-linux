@@ -19,6 +19,11 @@ TT RGB Plus on Windows.
 | Bars | AIDA64 SensorPanel style, up to four rows |
 | Single metric | one value, as large as the panel allows |
 | Synthwave | 80s neon sunset |
+| Tiles | iCUE-style grid of cards, up to six values |
+| History graph | current values plus a five-minute line chart |
+| Digital | seven-segment LCD digits |
+| Speedometer | needle gauges with green/amber/red zones |
+| Terminal | retro green console with text bars and scanlines |
 
 Metrics: CPU temperature and load, GPU temperature, load, power and VRAM
 (NVIDIA via `nvidia-smi`), RAM, SSD temperature and fan speed. Values turn

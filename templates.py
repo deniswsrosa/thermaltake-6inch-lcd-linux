@@ -11,6 +11,7 @@ background, unit ("C" or "F").
 import importlib.util
 import os
 import sys
+import time
 from pathlib import Path
 
 from PIL import Image, ImageDraw, ImageFont, ImageOps
@@ -25,6 +26,7 @@ FONTS = {
     False: "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
     True: "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "cond": "/usr/share/fonts/truetype/dejavu/DejaVuSansCondensed-Bold.ttf",
+    "mono": "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
 }
 _font_cache = {}
 
@@ -55,7 +57,9 @@ class Canvas:
 
     @staticmethod
     def _s(seq):
-        return [v * SS for v in seq]
+        """Scale coordinates; accepts flat numbers or (x, y) pairs."""
+        flat = [n for v in seq for n in (v if isinstance(v, (tuple, list)) else (v,))]
+        return [n * SS for n in flat]
 
     def text(self, xy, text, size, fill, weight=True, anchor="la"):
         self.d.text(self._s(xy), text, font=_font(size * SS, weight), fill=fill, anchor=anchor)
@@ -72,6 +76,24 @@ class Canvas:
 
     def line(self, points, fill, width=1):
         self.d.line(self._s(points), fill=fill, width=width * SS)
+
+    def poly(self, points, fill):
+        self.d.polygon([(x * SS, y * SS) for x, y in points], fill=fill)
+
+    def circle(self, centre, r, fill, outline=None, width=0):
+        x, y = centre
+        self.d.ellipse(self._s((x - r, y - r, x + r, y + r)), fill=fill,
+                       outline=outline, width=width * SS)
+
+    def glow(self, draw, radius=16):
+        """Run draw(canvas) on a black layer, blur it and add it as a glow."""
+        from PIL import ImageChops, ImageFilter
+        layer = Canvas.__new__(Canvas)
+        layer.img = Image.new("RGB", self.img.size, "#000000")
+        layer.d = ImageDraw.Draw(layer.img)
+        draw(layer)
+        self.img = ImageChops.add(self.img, layer.img.filter(ImageFilter.GaussianBlur(radius * SS)))
+        self.d = ImageDraw.Draw(self.img)
 
     def paste(self, img):
         self.img.paste(img.resize(self.img.size), (0, 0))
@@ -309,6 +331,209 @@ def synthwave(c, v, cfg):
     c.d = ImageDraw.Draw(c.img)
 
 
+def tiles(c, v, cfg):
+    """Grid of cards (Corsair iCUE / Lian Li style), one big value each."""
+    keys = [k for k in (slot(cfg, i) for i in range(6)) if k != "none"] or ["none"]
+    n = len(keys)
+    cols = n if n <= 3 else (2 if n == 4 else 3)
+    rows = -(-n // cols)
+    gap, pad = 16, 16
+    tw = (W - 2 * pad - (cols - 1) * gap) / cols
+    th = (H - 2 * pad - (rows - 1) * gap) / rows
+    size = int(min(th * 0.5, tw * 0.36, 190))
+    for i, key in enumerate(keys):
+        x0 = pad + (i % cols) * (tw + gap)
+        y0 = pad + (i // cols) * (th + gap)
+        colour = status_colour(key, v[key], cfg["accent"])
+        c.rect((x0, y0, x0 + tw, y0 + th), mix(cfg["background"], colour, 0.10), radius=22,
+               outline=mix(cfg["background"], colour, 0.35), width=2)
+        c.text((x0 + 26, y0 + 22), label(key, cfg), max(24, size // 4),
+               mix(cfg["accent2"], "#ffffff", 0.2))
+        c.text((x0 + tw / 2, y0 + th * 0.5 + size * 0.42), fmt(key, v[key], cfg), size,
+               colour if colour != cfg["accent"] else "#ffffff", weight="cond", anchor="ms")
+        bar(c, (x0 + 26, y0 + th - 34, x0 + tw - 26, y0 + th - 20),
+            fraction(key, v[key]), colour, mix(cfg["background"], "#ffffff", 0.10))
+
+
+_history = {}          # metric key -> deque of (time, value)
+HISTORY_SECONDS = 300
+
+
+def history(c, v, cfg):
+    """Current values on top, a line chart of the last five minutes below."""
+    import collections
+    keys = [k for k in (slot(cfg, i) for i in range(3)) if k != "none"] or ["none"]
+    palette = [cfg["accent"], cfg["accent2"], mix(cfg["accent"], cfg["accent2"], 0.5)]
+    now = time.monotonic()
+    for key in keys:
+        series = _history.setdefault(key, collections.deque())
+        if v[key] is not None and (not series or now - series[-1][0] >= 0.9):
+            series.append((now, v[key]))
+        while series and now - series[0][0] > HISTORY_SECONDS:
+            series.popleft()
+
+    cw = W / len(keys)
+    for i, key in enumerate(keys):
+        cx = cw * (i + 0.5)
+        colour = status_colour(key, v[key], palette[i])
+        c.text((cx, 26), label(key, cfg), 34, palette[i], anchor="mt")
+        c.text((cx, 190), fmt(key, v[key], cfg), 130 if len(keys) > 1 else 160, colour,
+               weight="cond", anchor="ms")
+
+    x0, y0, x1, y1 = 40, 230, W - 40, H - 30
+    grid = mix(cfg["background"], "#ffffff", 0.10)
+    for f in (0, 0.25, 0.5, 0.75, 1):
+        y = y1 - (y1 - y0) * f
+        c.line((x0, y, x1, y), grid, 1 if f % 0.5 else 2)
+    c.text((x1, y1 + 4), "now", 18, "#6b7280", weight=False, anchor="ra")
+    c.text((x0, y1 + 4), f"-{HISTORY_SECONDS // 60} min", 18, "#6b7280", weight=False)
+    lines = []
+    for i, key in enumerate(keys):
+        pts = [(x1 - (x1 - x0) * (now - t) / HISTORY_SECONDS, y1 - (y1 - y0) * fraction(key, val))
+               for t, val in _history.get(key, ())]
+        if len(pts) >= 2:
+            lines.append((i, pts))
+    if lines and lines[0][0] == 0:   # soft fill under the first line, behind everything
+        pts = lines[0][1]
+        c.poly(pts + [(pts[-1][0], y1), (pts[0][0], y1)], mix(cfg["background"], palette[0], 0.15))
+    for i, pts in reversed(lines):
+        c.line(pts, palette[i], 4)
+
+
+_SEGMENTS = {"0": "abcdef", "1": "bc", "2": "abged", "3": "abgcd", "4": "fgbc", "5": "afgcd",
+             "6": "afgedc", "7": "abc", "8": "abcdefg", "9": "abcdfg", "-": "g", " ": ""}
+
+
+def _seven_segment(c, x, y, w, h, char, on, off):
+    t = w * 0.2         # segment thickness
+    g = t * 0.18        # gap between segments
+    slant = h * 0.07    # italic lean
+
+    def lean(pts):
+        return [(px + slant * (1 - (py - y) / h), py) for px, py in pts]
+
+    def hseg(yc):
+        a, b = x + t / 2 + g, x + w - t / 2 - g
+        return lean([(a, yc), (a + t / 2, yc - t / 2), (b - t / 2, yc - t / 2), (b, yc),
+                     (b - t / 2, yc + t / 2), (a + t / 2, yc + t / 2)])
+
+    def vseg(xc, ya, yb):
+        return lean([(xc, ya), (xc + t / 2, ya + t / 2), (xc + t / 2, yb - t / 2), (xc, yb),
+                     (xc - t / 2, yb - t / 2), (xc - t / 2, ya + t / 2)])
+
+    top, mid, bottom = y + t / 2, y + h / 2, y + h - t / 2
+    shapes = {"a": hseg(top), "g": hseg(mid), "d": hseg(bottom),
+              "f": vseg(x + t / 2, top + g, mid - g), "b": vseg(x + w - t / 2, top + g, mid - g),
+              "e": vseg(x + t / 2, mid + g, bottom - g), "c": vseg(x + w - t / 2, mid + g, bottom - g)}
+    lit = _SEGMENTS.get(char, "g")
+    for name, pts in shapes.items():
+        c.poly(pts, on if name in lit else off)
+
+
+def digital(c, v, cfg):
+    """Seven-segment LCD digits with ghosted unlit segments."""
+    cols = columns(cfg)
+    n, cw = len(cols), W / len(cols)
+    base_h = {1: 300, 2: 250, 3: 190}[n]
+    lit = []
+    for i, (key, sub) in enumerate(cols):
+        accent = column_accent(cfg, i)
+        colour = status_colour(key, v[key], accent)
+        text = fmt(key, v[key], cfg, with_unit=False)
+        h = base_h
+        w = h * 0.5
+        step = w * 1.18
+        while len(text) * step > cw - 70:   # shrink long numbers (RPM, watts)
+            h *= 0.9
+            w, step = h * 0.5, h * 0.5 * 1.18
+        total = len(text) * step - (step - w)
+        x, y = cw * (i + 0.5) - total / 2 - 12, 130 + (base_h - h) / 2
+        c.text((cw * (i + 0.5), 50), label(key, cfg), 40 if n < 3 else 34,
+               mix(accent, "#ffffff", 0.3), anchor="mt")
+        for j, ch in enumerate(text):
+            lit.append((x + j * step, y, w, h, ch, colour))
+            _seven_segment(c, x + j * step, y, w, h, ch, colour,
+                           mix(cfg["background"], accent, 0.07))
+        c.text((x + total + 16, y + 6), unit_suffix(key, cfg), 30, colour)
+        if sub != "none":
+            c.text((cw * (i + 0.5), 500), f"{label(sub, cfg)}  {fmt(sub, v[sub], cfg)}",
+                   30 if n < 3 else 26, mix(accent, "#ffffff", 0.5), anchor="ms")
+    c.glow(lambda g: [_seven_segment(g, *args[:5], args[5], "#000000") for args in lit], 12)
+
+
+def speedometer(c, v, cfg):
+    """Car-dashboard needle gauges with green/amber/red zones."""
+    import math
+    cols = columns(cfg)
+    n, cw = len(cols), W / len(cols)
+    r = min(215, cw / 2 - 30)
+    cy = 300 if n < 3 else 285
+    for i, (key, sub) in enumerate(cols):
+        m = METRICS[key]
+        cx = cw * (i + 0.5)
+        box = (cx - r, cy - r, cx + r, cy + r)
+        stroke = max(14, int(r * 0.11))
+        if m.warn is not None:
+            zones = [(0, m.warn / m.max, "#2fbf71"), (m.warn / m.max, m.crit / m.max, WARN),
+                     (m.crit / m.max, 1, CRIT)]
+        else:
+            zones = [(0, 1, column_accent(cfg, i))]
+        for a, b, colour in zones:
+            c.arc(box, 180 + 180 * a, 180 + 180 * min(b, 1), mix(cfg["background"], colour, 0.75), stroke)
+        for k in range(11):   # ticks
+            ang = math.radians(180 + 18 * k)
+            r0 = r - stroke - (22 if k % 5 == 0 else 12)
+            c.line((cx + math.cos(ang) * r0, cy + math.sin(ang) * r0,
+                    cx + math.cos(ang) * (r - stroke - 4), cy + math.sin(ang) * (r - stroke - 4)),
+                   "#c8ccd4", 4 if k % 5 == 0 else 2)
+        ang = math.radians(180 + 180 * fraction(key, v[key]))
+        tip = (cx + math.cos(ang) * (r - stroke - 16), cy + math.sin(ang) * (r - stroke - 16))
+        c.line((cx, cy, *tip), "#ffffff", 7)
+        c.circle((cx, cy), 16, column_accent(cfg, i), outline="#ffffff", width=3)
+        c.text((cx, cy + 34), label(key, cfg), 34 if n < 3 else 28,
+               mix(column_accent(cfg, i), "#ffffff", 0.3), anchor="mt")
+        c.text((cx, cy + (150 if n < 3 else 135)), fmt(key, v[key], cfg), 96 if n < 3 else 80,
+               status_colour(key, v[key], "#ffffff"), weight="cond", anchor="ms")
+        if sub != "none":
+            c.text((cx, H - 14), f"{label(sub, cfg)}  {fmt(sub, v[sub], cfg)}",
+                   28 if n < 3 else 24, "#a0a6b2", anchor="ms")
+
+
+def terminal(c, v, cfg):
+    """Retro green console: monospace rows, text bars, scanlines and a blinking cursor."""
+    keys = [k for k in (slot(cfg, i) for i in range(5)) if k != "none"] or ["none"]
+    fg, dim = cfg["accent"], cfg["accent2"]
+    size = int(min(62, (H - 130) / len(keys) * 0.62))
+    char_w = c.text_width("0", size, "mono")
+    label_w = max(len(label(k, cfg)) for k in keys) + 1
+    value_w = max(6, max(len(fmt(k, v[k], cfg)) for k in keys))
+    bar_chars = max(4, int((W - 80) / char_w) - label_w - value_w - 4)
+    lines = []
+    for key in keys:
+        filled = round(fraction(key, v[key]) * bar_chars)
+        text = (f"{label(key, cfg):<{label_w}}{fmt(key, v[key], cfg):>{value_w}}  "
+                f"[{'#' * filled}{'.' * (bar_chars - filled)}]")
+        lines.append((text, status_colour(key, v[key], fg)))
+
+    prompt = "tt600@panel:~$ watch sensors"
+
+    def draw(target):
+        target.text((40, 30), prompt, 30, dim, weight="mono")
+        top, row_h = 100, (H - 150) / len(keys)
+        for j, (text, colour) in enumerate(lines):
+            target.text((40, top + j * row_h + row_h / 2), text, size, colour, weight="mono",
+                        anchor="lm")
+        if int(time.time()) % 2 == 0:   # blinking cursor
+            x = 40 + target.text_width(prompt + " ", 30, "mono")
+            target.rect((x, 32, x + 18, 64), dim)
+
+    draw(c)
+    c.glow(draw, 10)
+    shade = mix(cfg["background"], "#000000", 0.6)
+    for y in range(0, H, 4):   # scanlines
+        c.line((0, y, W, y), shade, 1)
+
+
 COLUMN_SLOTS = ["Column 1 value", "Column 1 bar", "Column 2 value", "Column 2 bar",
                 "Column 3 value", "Column 3 bar"]
 
@@ -326,6 +551,21 @@ TEMPLATES = {
     "synthwave": {"fn": synthwave, "name": "Synthwave (neon)",
                   "slots": [s.replace("bar", "footer") for s in COLUMN_SLOTS],
                   "accent": "#ff3fa4", "accent2": "#29e7ff", "background": "#12021f"},
+    "tiles":     {"fn": tiles, "name": "Tiles (iCUE style)",
+                  "slots": [f"Tile {i}" for i in range(1, 7)],
+                  "accent": "#4f8cff", "accent2": "#c9ced8", "background": "#0c0e13"},
+    "history":   {"fn": history, "name": "History graph",
+                  "slots": ["Line 1", "Line 2", "Line 3"],
+                  "accent": "#ff7a45", "accent2": "#76b900", "background": "#0b0d12"},
+    "digital":   {"fn": digital, "name": "Digital (7-segment)",
+                  "slots": [s.replace("bar", "footer") for s in COLUMN_SLOTS],
+                  "accent": "#ff453a", "accent2": "#30d5ff", "background": "#0a0606"},
+    "speedometer": {"fn": speedometer, "name": "Speedometer",
+                    "slots": [s.replace("bar", "footer") for s in COLUMN_SLOTS],
+                    "accent": "#4f8cff", "accent2": "#76b900", "background": "#0d0f14"},
+    "terminal":  {"fn": terminal, "name": "Terminal (retro)",
+                  "slots": [f"Row {i}" for i in range(1, 6)],
+                  "accent": "#33ff66", "accent2": "#1f9d45", "background": "#020a04"},
 }
 
 
@@ -336,6 +576,16 @@ def defaults(name, gpus=None):
         return list(TEMPLATES[name]["defaults"])
     if name == "single":
         return ["cpu_temp", "cpu_load"]
+    if name == "tiles":
+        if gpus >= 2:
+            return ["cpu_temp", "gpu0_temp", "gpu1_temp", "cpu_load", "gpu0_load", "gpu1_load"]
+        return ["cpu_temp", "gpu_temp", "ssd_temp", "cpu_load", "gpu_load", "ram"]
+    if name == "history":
+        return ["cpu_temp", "gpu0_temp", "gpu1_temp"] if gpus >= 2 else ["cpu_temp", "gpu_temp", "cpu_load"]
+    if name == "terminal":
+        if gpus >= 2:
+            return ["cpu_temp", "cpu_load", "gpu0_temp", "gpu1_temp", "ram"]
+        return ["cpu_temp", "cpu_load", "gpu_temp", "gpu_load", "ram"]
     if name == "bars":
         if gpus >= 2:
             return ["cpu_temp", "gpu0_temp", "gpu1_temp", "cpu_load"]
