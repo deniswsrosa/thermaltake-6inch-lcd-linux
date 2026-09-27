@@ -139,16 +139,24 @@ class _NVML:
         if self.lib.nvmlInit_v2() != 0:
             raise OSError("nvmlInit failed")
         count = ctypes.c_uint()
-        self.lib.nvmlDeviceGetCount_v2(ctypes.byref(count))
+        if self.lib.nvmlDeviceGetCount_v2(ctypes.byref(count)) != 0:
+            self.close()
+            raise OSError("nvmlDeviceGetCount failed")
         self.handles = []
         for i in range(count.value):
             h = ctypes.c_void_p()
-            if self.lib.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) == 0:
-                self.handles.append(h)
+            ok = self.lib.nvmlDeviceGetHandleByIndex_v2(i, ctypes.byref(h)) == 0
+            self.handles.append(h if ok else None)
+
+    def close(self):
+        self.lib.nvmlShutdown()
 
     def read(self):
         out = []
         for h in self.handles:
+            if h is None:
+                out.append([None] * 5)
+                continue
             temp, power = ctypes.c_uint(), ctypes.c_uint()
             util, mem = self._Util(), self._Mem()
             row = [
@@ -164,24 +172,42 @@ class _NVML:
 
 
 _nvml = None
+_gpu_refresh_at = 0.0
+GPU_REFRESH_SECONDS = 30.0
+GPU_DISCOVERY_SECONDS = 5 * 60.0
+_gpu_discovery_until = time.monotonic() + GPU_DISCOVERY_SECONDS
 
 
 def _nvidia():
     """[[temp, util %, mem used MiB, mem total MiB, power W], ...] per NVIDIA GPU."""
-    global _nvml
+    global _nvml, _gpu_refresh_at, _gpu_count
+    # Allow five minutes for cards to become available after startup, then
+    # retain the session and handles for normal temperature sampling.
+    if _gpu_refresh_at is not None:
+        now = time.monotonic()
+        if now > _gpu_discovery_until:
+            _gpu_refresh_at = None
+        elif now >= _gpu_refresh_at:
+            if _nvml:
+                _nvml.close()
+            _nvml = None
+            _gpu_refresh_at = now + GPU_REFRESH_SECONDS
     if _nvml is None:
         try:
             _nvml = _NVML()
         except (OSError, AttributeError):
             _nvml = False   # no NVML: fall back to nvidia-smi
     if _nvml:
-        return _nvml.read()
+        rows = _nvml.read()
+        _gpu_count = len(rows)
+        return rows
     try:
         out = subprocess.run(
             ["nvidia-smi", "--query-gpu=temperature.gpu,utilization.gpu,"
              "memory.used,memory.total,power.draw", "--format=csv,noheader,nounits"],
             capture_output=True, text=True, timeout=3, check=True).stdout
     except (OSError, subprocess.SubprocessError):
+        _gpu_count = 0
         return []
 
     def num(v):
@@ -189,7 +215,9 @@ def _nvidia():
             return float(v)
         except ValueError:
             return None
-    return [[num(f) for f in line.split(",")] for line in out.strip().splitlines()]
+    rows = [[num(f) for f in line.split(",")] for line in out.strip().splitlines()]
+    _gpu_count = len(rows)
+    return rows
 
 
 _gpu_count = None
@@ -197,7 +225,8 @@ _gpu_count = None
 
 def gpu_count():
     global _gpu_count
-    if _gpu_count is None:
+    if _gpu_count is None or (_gpu_refresh_at is not None
+                             and time.monotonic() >= _gpu_refresh_at):
         _gpu_count = len(_nvidia())
     return _gpu_count
 
