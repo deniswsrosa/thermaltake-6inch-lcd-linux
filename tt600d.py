@@ -6,7 +6,9 @@ the panel. Settings come from ~/.config/tt600/config.json (edited by the
 tray app) and are reloaded whenever the file changes. Panel state is
 published in $XDG_RUNTIME_DIR/tt600-status.json for the tray to show.
 
-The daemon reconnects if the panel disappears (replug, suspend/resume).
+The daemon reconnects if the panel disappears (replug, suspend/resume), and
+re-runs the handshake if it was stalled long enough for the panel to drop out
+of live mode (e.g. the system froze under memory pressure).
 """
 
 import argparse
@@ -25,6 +27,8 @@ import tt600
 
 
 KEEPALIVE = 2.0   # seconds between frames, whatever the update interval
+STALE = 4.0       # a gap this long risks the panel's 5 s fallback: re-handshake
+HEALTHCHECK = 60.0  # re-handshake this often anyway; frames get no replies
 
 
 def _low_memory():
@@ -72,6 +76,7 @@ def main():
 
     panel, brightness = None, None
     jpeg, shown, next_render = None, None, 0.0
+    last_sent, last_handshake = 0.0, 0.0
     try:
         while True:
             now = time.monotonic()
@@ -89,8 +94,19 @@ def main():
                     info = panel.connect()
                     panel.realtime(True)
                     brightness = None
+                    last_sent = last_handshake = time.monotonic()
                     publish(connected=True, node=node, firmware=info["version"]["firmware"])
                     print(f"tt600d: connected {node} (fw {info['version']['firmware']})", flush=True)
+                elif now - last_sent > STALE or now - last_handshake > HEALTHCHECK:
+                    # Frame writes succeed even after the panel has fallen back to
+                    # its own screen, so redo the handshake to put it back in live
+                    # mode; a panel that no longer answers raises and reconnects.
+                    if now - last_sent > STALE:
+                        print(f"tt600d: no frame for {now - last_sent:.0f}s; re-handshaking", flush=True)
+                    panel.connect()
+                    panel.realtime(True)
+                    brightness = None
+                    last_handshake = time.monotonic()
                 if cfg["brightness"] != brightness:
                     panel.brightness(cfg["brightness"])
                     brightness = cfg["brightness"]
@@ -105,6 +121,7 @@ def main():
                 # Re-send at least every KEEPALIVE seconds: the panel falls back to
                 # its own screen when frames stop for `timeout` (5 s) seconds.
                 panel.send_jpeg(jpeg)
+                last_sent = time.monotonic()
             except (OSError, TimeoutError, RuntimeError, ValueError) as exc:
                 print(f"tt600d: {exc}; reconnecting", file=sys.stderr, flush=True)
                 publish(connected=False)
