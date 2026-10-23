@@ -822,8 +822,9 @@ class PumpDesigner(Gtk.Box):
             keys = {self.settings[slot] for slot in SLOTS if self.settings[slot] != "none"}
             self.live_values = format_values(sensors.read(keys=keys))
             status = read_status()
-            self.device_status.set_text("Pump LCD connected" if status.get("connected") else
-                                        "Pump detected; service is waiting for the display")
+            self.device_status.set_text(
+                "Pump LCD connected" if status.get("connected") else
+                status.get("error", "Pump detected; service is waiting for the display"))
             self.next_stats = time.monotonic() + 1
         if self.frames:
             self.frame_index = (self.frame_index + 1) % len(self.frames)

@@ -62,7 +62,9 @@ class Panel:
                     raise RuntimeError(f"Cannot wake {sleeping}: {error}. Install the udev rule first.") from error
             time.sleep(1)
         if self.port is None:
-            raise RuntimeError("CT21INCH panel was not found. Check lsusb and the USB connection.")
+            if pump_detect.sleeping_port():
+                raise RuntimeError("CT21INCH detected but did not wake; fully remove PC power before retrying")
+            raise RuntimeError("CT21INCH panel was not found. Check USB connection.")
         if self.reset_on_start:
             self._reset_and_reopen()
         response = b""
