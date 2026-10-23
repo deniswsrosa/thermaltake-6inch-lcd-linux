@@ -22,6 +22,8 @@ from gi.repository import Gdk, GdkPixbuf, Gio, GLib, Gtk  # noqa: E402
 import psutil  # noqa: E402
 
 import config  # noqa: E402
+import pump_detect  # noqa: E402
+import pump_mock  # noqa: E402
 import sensors  # noqa: E402
 import templates  # noqa: E402
 
@@ -55,6 +57,8 @@ class Tray(Gtk.Application):
         self.cfg = config.load()
         self.cfg_mtime = config.mtime()
         self.window = None
+        self.pump_connected = pump_detect.present()
+        self.pump_designer = None
         self.syncing = False
         self.values = {k: None for k in sensors.METRICS}
         self.save_timer = None
@@ -106,6 +110,13 @@ class Tray(Gtk.Application):
 
     def poll(self):
         """Pick up external config edits and refresh the panel status line."""
+        connected = pump_detect.present()
+        if connected != self.pump_connected:
+            self.pump_connected = connected
+            self.pump_item.set_visible(connected)
+            self.pump_status_item.set_visible(connected)
+            if self.window:
+                self.sync_pump_page()
         if config.mtime() != self.cfg_mtime and not self.save_timer:
             self.cfg, self.cfg_mtime = config.load(), config.mtime()
             self.sync_menu()
@@ -119,6 +130,10 @@ class Tray(Gtk.Application):
         else:
             text = "Service not running"
         self.status_item.set_label(text)
+        if self.pump_connected:
+            pump_status = pump_mock.read_status()
+            self.pump_status_item.set_label("Pump LCD connected" if pump_status.get("connected") else
+                                            "Pump LCD detected · waiting for display")
         return True
 
     # ── tray menu ────────────────────────────────────────────────────────────
@@ -126,6 +141,8 @@ class Tray(Gtk.Application):
         menu = Gtk.Menu()
         self.status_item = Gtk.MenuItem(label="…", sensitive=False)
         menu.append(self.status_item)
+        self.pump_status_item = Gtk.MenuItem(label="Pump LCD detected", sensitive=False)
+        menu.append(self.pump_status_item)
         menu.append(Gtk.SeparatorMenuItem())
 
         self.radios = {}
@@ -149,10 +166,16 @@ class Tray(Gtk.Application):
         item = Gtk.MenuItem(label="Customize…")
         item.connect("activate", lambda *_: self.customize())
         menu.append(item)
+        item = Gtk.MenuItem(label="Configure pump LCD…")
+        item.connect("activate", lambda *_: self.open_pump())
+        menu.append(item)
+        self.pump_item = item
         item = Gtk.MenuItem(label="Quit tray icon")
         item.connect("activate", lambda *_: self.quit())
         menu.append(item)
         menu.show_all()
+        self.pump_item.set_visible(self.pump_connected)
+        self.pump_status_item.set_visible(self.pump_connected)
         self.sync_menu()
         return menu
 
@@ -180,12 +203,18 @@ class Tray(Gtk.Application):
         self.window.present()
 
     def build_window(self):
-        w = Gtk.ApplicationWindow(application=self, title="Thermaltake LCD")
-        w.set_default_size(980, 0)
-        w.set_border_width(16)
+        w = Gtk.ApplicationWindow(application=self, title="LCD Displays")
+        w.set_default_size(1110, 770)
         w.connect("destroy", self.on_window_closed)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, border_width=12)
+        w.add(outer)
+        self.stack = Gtk.Stack(transition_type=Gtk.StackTransitionType.CROSSFADE)
+        self.device_switcher = Gtk.StackSwitcher(stack=self.stack, halign=Gtk.Align.CENTER)
+        outer.pack_start(self.device_switcher, False, False, 0)
+        outer.pack_start(self.stack, True, True, 0)
         box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=20)
-        w.add(box)
+        self.stack.add_titled(box, "case", "Thermaltake panel")
+        box.set_border_width(8)
 
         left = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
         self.preview = Gtk.Image()
@@ -198,12 +227,33 @@ class Tray(Gtk.Application):
         self.notebook = Gtk.Notebook()
         box.pack_start(self.notebook, True, True, 0)
         self.window = w
+        self.sync_pump_page()
         self.preview_timer = GLib.timeout_add(1500, self.live_preview)
         w.show_all()
+        self.device_switcher.set_visible(self.pump_connected)
 
     def on_window_closed(self, *_):
         GLib.source_remove(self.preview_timer)
         self.window = None
+        self.pump_designer = None
+
+    def sync_pump_page(self):
+        if self.pump_connected and self.pump_designer is None:
+            self.pump_designer = pump_mock.PumpDesigner(live=True)
+            self.stack.add_titled(self.pump_designer, "pump", "Pump LCD")
+            self.stack.show_all()
+        elif not self.pump_connected and self.pump_designer is not None:
+            self.stack.set_visible_child_name("case")
+            self.stack.remove(self.pump_designer)
+            self.pump_designer.destroy()
+            self.pump_designer = None
+        self.device_switcher.set_visible(self.pump_connected)
+
+    def open_pump(self):
+        if not self.pump_connected:
+            return
+        self.customize()
+        self.stack.set_visible_child_name("pump")
 
     def fill_window(self):
         """(Re)build the controls from the current settings."""
