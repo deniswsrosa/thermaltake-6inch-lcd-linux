@@ -1,7 +1,7 @@
 """Identify the optional SL360 XE pump without opening a serial port.
 
-The awake USB identity is generic. Its physical path must match the path
-previously observed from the distinctive CT21INCH sleeping identity.
+The awake USB identity is generic. Some controllers expose the sleeping and
+awake identities simultaneously on sibling ports of the same internal hub.
 """
 
 from __future__ import annotations
@@ -42,9 +42,20 @@ def awake_port():
     location = target_location()
     if not location:
         return None
-    return next((port for port in comports()
-                 if port.location == location and port.serial_number == "20080411"
-                 and (port.vid, port.pid) in AWAKE_IDS), None)
+    candidates = [port for port in comports()
+                  if port.location and port.serial_number == "20080411"
+                  and (port.vid, port.pid) in AWAKE_IDS]
+    exact = next((port for port in candidates if port.location == location), None)
+    if exact:
+        return exact
+    # USB location "8-12.2:1.0" is port 2 below hub 8-12. The awake
+    # identity can remain visible beside CT21INCH at "8-12.1:1.0".
+    parent = location.split(":", 1)[0].rsplit(".", 1)[0]
+    if parent == location.split(":", 1)[0]:
+        return None
+    siblings = [port for port in candidates
+                if port.location.split(":", 1)[0].rsplit(".", 1)[0] == parent]
+    return siblings[0] if len(siblings) == 1 else None
 
 
 def present() -> bool:
